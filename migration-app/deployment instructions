@@ -1,0 +1,3 @@
+To deploy the app, run the following command from the root directory (Migration-Wizzard-app):
+
+npx vercel --prod --yes

@@ -10,7 +10,7 @@ import {
   Users,
   ShoppingBag,
   Search,
-  Link,
+  Link as LinkIcon,
   ShoppingCart,
   MessageSquareQuote,
   Wand2,
@@ -23,7 +23,6 @@ import {
   LayoutTemplate,
   X,
   FileBox,
-  Link2,
   Scissors,
   ChevronDown,
   ChevronUp,
@@ -82,7 +81,7 @@ const cleanText = (str) => {
     .replace(/\\n/g, '\n')
     .replace(/\r/g, '')
     .replace(/\\/g, '')
-    .replace(/>\s*\n\s*</g, '><') // FIX: Strip invisible line breaks between HTML tags (like </li> and <li>)
+    .replace(/>\s*\n\s*</g, '><') // Strip invisible line breaks between HTML tags
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n\n')
     .replace(/<li[^>]*>/gi, '\n• ')
@@ -90,7 +89,7 @@ const cleanText = (str) => {
     .replace(/<[^>]*>?/gm, '');
 
   return text
-    .replace(/([•\-*])\s*\n\s*/g, '$1 ')
+    .replace(/([•\-*])\s*\n\s*/g, '$1 ') // Snap floating bullets back
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 };
@@ -214,6 +213,7 @@ export default function App() {
 
   const [wooReviewsData, setWooReviewsData] = useState(null);
   const [shopifyReviewsData, setShopifyReviewsData] = useState(null);
+  const [reviewsFileName, setReviewsFileName] = useState('');
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -232,6 +232,8 @@ export default function App() {
 
   const [showRejectedCols, setShowRejectedCols] = useState(false);
   const [rejectedSearch, setRejectedSearch] = useState('');
+
+  const [newMeta, setNewMeta] = useState({ wooCol: '', name: '', shopifyMeta: '', type: 'single_line_text_field' });
 
   const [aiMapping, setAiMapping] = useState({
     coreMappings: {
@@ -297,6 +299,7 @@ export default function App() {
     setIsAnalyzing(true);
     setAiError('');
 
+    // --- GOLDEN SAMPLE ALGORITHM ---
     const primaryRows = wooCsvData.filter(r => !(r.Type || '').toLowerCase().includes('variation'));
     const pool = primaryRows.length > 0 ? primaryRows : wooCsvData;
 
@@ -333,7 +336,7 @@ export default function App() {
 
     let urlContext = "";
     if (sampleProductUrl) {
-      const urlContext = `\nCRITICAL CONTEXT: Live product link: ${sampleProductUrl}. Use Google Search to compare the rendered live page against the raw CSV data. Find the specific vendor/brand shown on the page and match it exactly to the data in the rows.`;
+      urlContext = `\nCRITICAL CONTEXT: Live product link: ${sampleProductUrl}. Use Google Search to compare the rendered live page against the raw CSV data. Find the specific vendor/brand shown on the page and match it exactly to the data in the rows.`;
     }
 
     const promptText = `
@@ -349,6 +352,7 @@ export default function App() {
          - 'name': Create a CLEAN, human-readable name based strictly on the ACTUAL VALUES in the column. If the header says 'Hair Concern' but the values are '30ml, 200ml', name it 'Size/Volume'. DO NOT blindly trust the header if the data contradicts it!
          - 'shopifyMeta': Create a clean, standard key (format: product.metafields.custom.clean_key_name).
          - 'type': MUST be one of Shopify's exact types: 'single_line_text_field', 'multi_line_text_field', 'number_integer', 'number_decimal', or 'boolean'.
+         - CRITICAL OVERRIDE: You MUST blindly extract ANY 'Short description', 'Subtitle' (like 'Meta: ps_subtitle'), or 'SEO' related columns (like 'SEO title') into the Metafield Schema. Merchants require these as standalone dynamic block sources, even if they are mapped in Tier 1!
       3. Section Extraction: Scan the text inside the main Description column for standard Shopify modular content. Shopify 2.0 relies on Collapsible Rows for things like:
          - "FAQ" or "Frequently Asked Questions"
          - "Ingredients", "Materials", or "Specifications"
@@ -480,7 +484,7 @@ export default function App() {
       CRITICAL CHECKS:
       1. HTML Validation: The 'Description' column SHOULD have clean HTML like <h3>, <p>, <ul>. DO NOT fail for these tags. Fail ONLY if there are literal unparsed '\\n' characters floating around.
       2. Metafields: Verify any 'product.metafields.namespace.key' columns are populated correctly based on the headers.
-      3. Taxonomy: If 'Product category' is blank and 'Type' is populated, this is a PASS. If 'Product category' has arbitrary data (e.g., "A > B > C"), throw a WARNING.
+      3. Taxonomy: If 'Product category' is blank and 'Type' is populated, this is a PASS. If 'Product category' has arbitrary data, throw a WARNING.
       
       Generated Data Sample: ${JSON.stringify(sampleData)}
     `;
@@ -582,8 +586,10 @@ export default function App() {
 
         if (aiMapping.descriptionStrategy === 'extract-metafields') {
           const extraction = extractSectionsToMetafields(wooDesc, aiMapping.extractedSections || []);
+
           if (wooShort) finalDescription += formatBlock(cleanText(wooShort));
           if (extraction.main) finalDescription += extraction.main;
+
           extractedMetaData = extraction.meta;
 
         } else if (aiMapping.descriptionStrategy === 'accordion') {
@@ -853,9 +859,69 @@ export default function App() {
     }));
   };
 
+  const handleAddHeading = (e) => {
+    if (e.key === 'Enter' && e.target.value.trim()) {
+      e.preventDefault();
+      setAiMapping(prev => ({
+        ...prev,
+        descriptionHeadings: [...(prev.descriptionHeadings || []), e.target.value.trim()]
+      }));
+      e.target.value = '';
+    }
+  };
+
+  const removeHeading = (idx) => {
+    setAiMapping(prev => ({
+      ...prev,
+      descriptionHeadings: prev.descriptionHeadings.filter((_, i) => i !== idx)
+    }));
+  };
+
+  const handleReviewsUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setReviewsFileName(file.name);
+    setIsProcessing(true);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target.result;
+      const parsed = parseCSV(text);
+      const headers = parsed[0].map(h => h.trim());
+      const rows = parsed.slice(1).filter(row => row.length > 1 || row[0] !== '').map(row => {
+        const obj = {};
+        headers.forEach((header, i) => { obj[header] = row[i]; });
+        return obj;
+      });
+      setWooReviewsData(rows);
+      processReviewsMapping(rows);
+    };
+    reader.readAsText(file);
+  };
+
+  const processReviewsMapping = (wooReviews) => {
+    setTimeout(() => {
+      const formattedReviews = [];
+      wooReviews.forEach(review => {
+        if (review['comment_approved'] !== '1') return;
+        const productHandle = slugify(review['product_title'] || '');
+        if (!productHandle) return;
+        formattedReviews.push({
+          'product_handle': productHandle,
+          'rating': review['rating'] || '5',
+          'title': review['title'] || 'Product Review',
+          'author': review['comment_author'] || 'Verified Buyer',
+          'email': review['comment_author_email'] || '',
+          'body': review['comment_content'] || '',
+          'created_at': review['comment_date'] || ''
+        });
+      });
+      setShopifyReviewsData(formattedReviews);
+      setIsProcessing(false);
+    }, 500);
+  };
+
   // --- Metafield Schema UI Handlers ---
   const generateCleanMetaName = (rawCol) => {
-    // 1. WOOCOMMERCE STANDARD COLUMNS TRANSLATION
     const WOO_DICTIONARY = {
       'ID': 'WooCommerce Database ID (Junk)',
       'Is featured?': 'Featured Product Flag',
@@ -882,14 +948,18 @@ export default function App() {
       'Cross-sells': 'Cross-sell Product IDs',
       'External URL': 'Affiliate Link URL',
       'Button text': 'Affiliate Button Text',
-      'Position': 'Menu Order / Sorting Position'
+      'Position': 'Menu Order / Sorting Position',
+      // Explicit overrides for SEO and Subtitles
+      'Short description': 'Short Description',
+      'SEO title': 'SEO Title',
+      'SEO description': 'SEO Description',
+      'Meta: ps_subtitle': 'Product Subtitle'
     };
 
     if (WOO_DICTIONARY[rawCol]) return WOO_DICTIONARY[rawCol];
 
     let clean = rawCol.replace(/^(Meta|Attribute)[\s:]*/i, '').trim();
 
-    // 2. WOOCOMMERCE HIDDEN META TRANSLATION
     const META_DICTIONARY = {
       '_edit_lock': 'WordPress Editor Lock (Junk)',
       '_edit_last': 'Last Edited By (Junk)',
@@ -912,24 +982,20 @@ export default function App() {
 
     if (META_DICTIONARY[clean]) return META_DICTIONARY[clean];
 
-    // 3. WOOCOMMERCE ATTRIBUTE SYSTEM FLAGS
     if (clean.match(/^Attribute \d+ visible/i)) return 'Attribute Visibility Flag (Junk)';
     if (clean.match(/^Attribute \d+ global/i)) return 'Attribute Global Flag (Junk)';
     if (clean.match(/^Attribute \d+ default/i)) return 'Attribute Default Value (Junk)';
 
-    // 4. PLUGIN PREFIX TRANSLATIONS
     if (clean.startsWith('_yoast_wpseo_')) return 'Yoast SEO: ' + clean.replace('_yoast_wpseo_', '').replace(/_/g, ' ');
     if (clean.startsWith('_wc_')) return 'WooCommerce: ' + clean.replace('_wc_', '').replace(/_/g, ' ');
     if (clean.startsWith('_yith_')) return 'YITH Plugin: ' + clean.replace('_yith_', '').replace(/_/g, ' ');
     if (clean.startsWith('_wp_')) return 'WordPress System: ' + clean.replace('_wp_', '').replace(/_/g, ' ');
 
-    // 5. GENERIC CLEANUP FALLBACK
     clean = clean.replace(/value\(s\)/i, '').replace(/[_]/g, ' ').trim();
     if (!clean || clean.length <= 2) {
       clean = rawCol.replace(/[_]/g, ' ').trim();
     }
 
-    // Title Case formatting
     return clean.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
   };
 
@@ -960,14 +1026,13 @@ export default function App() {
     }));
   };
 
-  // Derived state for the Metafield Schema UI
   const usedCoreCols = Object.values(aiMapping.coreMappings).filter(Boolean);
   const mappedMetaCols = aiMapping.metafields.map(m => m.wooCol);
 
-  // The Rejected/Unmapped columns (Junk Drawer)
-  const allRejectedMetafields = wooColumns.filter(c => !usedCoreCols.includes(c) && !KNOWN_WOO_BASE_COLS.includes(c) && !mappedMetaCols.includes(c));
+  // FIX: We removed `usedCoreCols` from the exclusion logic. 
+  // This allows columns like "Short description" to be mapped to BOTH the base CSV template AND as a Metafield!
+  const allRejectedMetafields = wooColumns.filter(c => !KNOWN_WOO_BASE_COLS.includes(c) && !mappedMetaCols.includes(c));
 
-  // Filter rejected columns based on search
   const filteredRejectedMetafields = allRejectedMetafields.filter(col => {
     if (!rejectedSearch) return true;
     const cleanName = generateCleanMetaName(col).toLowerCase();
@@ -1108,6 +1173,23 @@ export default function App() {
                       </span>
                     )}
                   </div>
+
+                  {aiReport.manual !== true && (
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-6 mb-8">
+                      <h3 className="font-bold text-indigo-900 mb-2">Architect's Summary</h3>
+                      <p className="text-indigo-800 text-sm mb-4 leading-relaxed">{aiReport.analysisSummary}</p>
+
+                      <h4 className="text-xs font-bold text-indigo-900 uppercase tracking-wider mb-3">Strategic Rationale</h4>
+                      <ul className="space-y-2">
+                        {aiReport.strategicRationale?.map((rationale, idx) => (
+                          <li key={idx} className="flex items-start gap-2 text-sm text-indigo-800 bg-white bg-opacity-50 p-2 rounded-lg border border-indigo-100">
+                            <Check className="w-4 h-4 text-indigo-500 flex-shrink-0 mt-0.5" />
+                            <span>{rationale}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   <div className="space-y-6 mb-8">
 
@@ -1341,14 +1423,16 @@ export default function App() {
                               {filteredRejectedMetafields.map(col => {
                                 const rawCleanName = generateCleanMetaName(col);
                                 const isJunk = rawCleanName.includes('(Junk)');
+                                const isCore = usedCoreCols.includes(col);
                                 const displayName = rawCleanName.replace(' (Junk)', '').trim();
 
                                 return (
                                   <div key={col} className={`flex items-start justify-between bg-white border border-gray-200 p-3 rounded-lg transition-colors shadow-sm ${isJunk ? 'opacity-60 bg-gray-50 hover:opacity-100' : 'hover:border-gray-300'}`}>
                                     <div className="flex flex-col min-w-0 flex-1 mr-3">
-                                      <div className="flex items-start gap-2 mb-1">
+                                      <div className="flex items-start gap-2 mb-1 flex-wrap">
                                         <span className="text-sm font-bold text-gray-800 line-clamp-3 leading-tight" title={displayName}>{displayName}</span>
                                         {isJunk && <span className="text-[10px] bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded font-bold uppercase flex-shrink-0 mt-0.5">System Data</span>}
+                                        {isCore && <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-bold uppercase flex-shrink-0 mt-0.5" title="Used in Core Mapping">Core Mapped</span>}
                                       </div>
                                       <span className="text-[10px] font-mono text-gray-400 truncate" title={col}>Raw: {col}</span>
                                     </div>
@@ -1487,7 +1571,7 @@ export default function App() {
 
                 {generateRedirects && (
                   <div className="bg-white rounded-lg p-6 border border-gray-200 flex flex-col items-center text-center shadow-sm">
-                    <Link className="w-8 h-8 text-green-600 mb-3" />
+                    <LinkIcon className="w-8 h-8 text-green-600 mb-3" />
                     <h3 className="font-bold text-gray-900 mb-1">301 URL Redirects CSV</h3>
                     <p className="text-xs text-gray-500 mb-4">{redirectsCsvData?.length} paths</p>
                     <button onClick={() => triggerDownload(redirectsCsvData, REDIRECT_HEADERS, 'shopify_url_redirects.csv')} className="bg-green-600 hover:bg-green-700 text-white w-full px-4 py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors">
