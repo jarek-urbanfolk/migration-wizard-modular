@@ -1,3 +1,10 @@
-To deploy the app, run the following command from the root directory (Migration-Wizzard-app):
+# Deployment Instructions (Modular Engine)
 
-npx vercel --prod --yes
+1. Ensure you are in the new project root:
+   cd /Users/jarek/Desktop/Jarek/URBANFOLK/Migration-Wizard-Modular
+
+2. First-time setup (install dependencies):
+   cd migration-app && npm install && cd ..
+
+3. Deploy to production:
+   npx vercel --prod --yes
