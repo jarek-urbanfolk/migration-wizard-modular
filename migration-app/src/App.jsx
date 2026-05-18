@@ -6,6 +6,7 @@ import {
   X, FileBox, Scissors, ChevronDown, ChevronUp, Plus, Server, Key, Play, Info, Cpu,
   Download, AlertCircle, ArrowDownToLine, ShieldAlert, ShieldCheck
 } from 'lucide-react';
+import { XMLParser } from 'fast-xml-parser';
 
 // --- PROVEN V1 UTILITY: CSV PARSER ---
 const parseCSV = (str) => {
@@ -22,6 +23,93 @@ const parseCSV = (str) => {
     arr[row][col] += cc;
   }
   return arr;
+};
+
+// --- NEW XML PARSER & NORMALIZER ---
+const parseAndNormalizeXML = (xmlString) => {
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: "",
+    allowBooleanAttributes: true
+  });
+  
+  let jsonObj;
+  try {
+    jsonObj = parser.parse(xmlString);
+  } catch (e) {
+    console.error("XML Parsing Error:", e);
+    return [];
+  }
+
+  // Find the largest array in the JSON to use as rows (auto-detect repeating elements like <item>, <product>)
+  let maxArray = [];
+  const findLargestArray = (obj) => {
+    if (Array.isArray(obj)) {
+      if (obj.length > maxArray.length) maxArray = obj;
+      obj.forEach(findLargestArray);
+    } else if (obj !== null && typeof obj === 'object') {
+      Object.values(obj).forEach(findLargestArray);
+    }
+  };
+  findLargestArray(jsonObj);
+
+  if (!maxArray || maxArray.length === 0) {
+    // If no array found, try wrapping the root in an array
+    maxArray = [jsonObj];
+  }
+
+  const flattenedRows = maxArray.map(item => {
+    const flat = {};
+    const flattenObj = (obj, prefix = '') => {
+      if (Array.isArray(obj)) {
+        // Handle WordPress wp:postmeta specifically
+        if (obj.every(o => o && typeof o === 'object' && ('wp:meta_key' in o))) {
+          obj.forEach(meta => {
+            if (meta['wp:meta_key']) {
+              flat[meta['wp:meta_key']] = meta['wp:meta_value'] !== undefined ? String(meta['wp:meta_value']) : '';
+            }
+          });
+        } else {
+          // General arrays: comma-separated string
+          const vals = obj.map(v => typeof v === 'object' ? JSON.stringify(v) : v).join(', ');
+          flat[prefix] = vals;
+        }
+      } else if (obj !== null && typeof obj === 'object') {
+        Object.keys(obj).forEach(key => {
+          // Flatten nested objects
+          if (key === 'wp:postmeta' && Array.isArray(obj[key])) {
+             flattenObj(obj[key], prefix); // Let the array handler deal with it
+          } else if (key === 'wp:postmeta' && typeof obj[key] === 'object' && obj[key]['wp:meta_key']) {
+             // Handle single wp:postmeta
+             flat[obj[key]['wp:meta_key']] = obj[key]['wp:meta_value'] !== undefined ? String(obj[key]['wp:meta_value']) : '';
+          } else {
+             flattenObj(obj[key], prefix ? `${prefix}_${key}` : key);
+          }
+        });
+      } else {
+        flat[prefix] = obj;
+      }
+    };
+    flattenObj(item);
+    return flat;
+  });
+
+  // Collect all unique headers
+  const headersSet = new Set();
+  flattenedRows.forEach(row => {
+    Object.keys(row).forEach(k => headersSet.add(k));
+  });
+  const headers = Array.from(headersSet);
+
+  // Return exactly like parseCSV: array of arrays. 
+  // First element is headers, subsequent are rows matching header order
+  const result = [headers];
+  flattenedRows.forEach(rowObj => {
+    const rowArr = headers.map(h => rowObj[h] !== undefined && rowObj[h] !== null ? String(rowObj[h]) : '');
+    result.push(rowArr);
+  });
+
+  return result;
 };
 
 const unparseCSV = (data, headers) => {
@@ -302,12 +390,18 @@ export default function App() {
   const handleFileUpload = (e, flowContext) => {
     const file = e.target.files[0]; if (!file) return;
     setIsProcessing(true);
+    const isXML = file.name.toLowerCase().endsWith('.xml');
     const reader = new FileReader();
     reader.onload = (event) => {
-      const parsed = parseCSV(event.target.result);
+      let parsed = [];
+      if (isXML) {
+        parsed = parseAndNormalizeXML(event.target.result);
+      } else {
+        parsed = parseCSV(event.target.result);
+      }
       if (!parsed || parsed.length === 0 || !parsed[0]) {
         setIsProcessing(false);
-        alert("Empty or malformed CSV file.");
+        alert(`Empty or malformed ${isXML ? 'XML' : 'CSV'} file.`);
         return;
       }
       const headers = parsed[0].map(h => (h || '').toString().replace(/[\t\r\n]/g, ' ').trim());
@@ -757,17 +851,23 @@ export default function App() {
   const handleReviewsUpload = (e) => {
     const file = e.target.files?.[0]; if (!file) return;
     setIsProcessing(true);
+    const isXML = file.name.toLowerCase().endsWith('.xml');
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
         const content = event.target.result;
         if (!content) throw new Error("File is empty");
 
-        const parsed = parseCSV(content);
-        if (!parsed || parsed.length < 2) throw new Error("CSV has no data rows");
+        let parsed = [];
+        if (isXML) {
+          parsed = parseAndNormalizeXML(content);
+        } else {
+          parsed = parseCSV(content);
+        }
+        if (!parsed || parsed.length < 2) throw new Error(`${isXML ? 'XML' : 'CSV'} has no data rows`);
 
         const headers = (parsed[0] || []).map(h => (h || '').trim());
-        if (headers.length === 0) throw new Error("CSV has no headers");
+        if (headers.length === 0) throw new Error(`${isXML ? 'XML' : 'CSV'} has no headers`);
 
         const rows = parsed.slice(1).map(r => {
           const obj = {};
@@ -1287,9 +1387,9 @@ export default function App() {
                 <div className="text-center py-12">
                   <h3 className="text-xl font-bold mb-4">Step 1: Upload WooCommerce Products</h3>
                   <div className="border-2 border-dashed border-gray-300 rounded-xl p-12 hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => fileInputRef.current.click()}>
-                    <input type="file" accept=".csv" className="hidden" ref={fileInputRef} onChange={(e) => handleFileUpload(e, 'products')} />
+                    <input type="file" accept=".csv, .xml" className="hidden" ref={fileInputRef} onChange={(e) => handleFileUpload(e, 'products')} />
                     <FileSpreadsheet className="w-12 h-12 text-blue-500 mx-auto mb-4" />
-                    <p className="text-gray-600 font-medium">Click to upload Products CSV</p>
+                    <p className="text-gray-600 font-medium">Click to upload Products CSV or XML</p>
                   </div>
                   <button onClick={nextStep} className="mt-8 text-gray-500 text-sm hover:underline">Skip to Step 2</button>
                 </div>
@@ -1447,10 +1547,10 @@ export default function App() {
                     </div>
 
                     <div className="border-2 border-dashed border-purple-200 rounded-xl p-10 text-center bg-white hover:border-purple-400 transition-colors relative">
-                      <input type="file" onChange={handleReviewsUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" accept=".csv" />
+                      <input type="file" onChange={handleReviewsUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" accept=".csv, .xml" />
                       <div className="flex flex-col items-center">
                         <div className="bg-purple-100 p-4 rounded-full mb-4"><Upload className="w-8 h-8 text-purple-600" /></div>
-                        <p className="font-bold text-purple-900 text-lg">Click to Upload Reviews CSV</p>
+                        <p className="font-bold text-purple-900 text-lg">Click to Upload Reviews CSV or XML</p>
                         <p className="text-sm text-purple-600 mt-1">WooCommerce "Comments" export</p>
                       </div>
                     </div>
@@ -1528,9 +1628,9 @@ export default function App() {
                 <div className="text-center py-12">
                   <h3 className="text-xl font-bold mb-4">Step 1: Upload WooCommerce Customers</h3>
                   <div className="border-2 border-dashed border-gray-300 rounded-xl p-12 hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => fileInputRef.current.click()}>
-                    <input type="file" accept=".csv" className="hidden" ref={fileInputRef} onChange={(e) => handleFileUpload(e, 'customers')} />
+                    <input type="file" accept=".csv, .xml" className="hidden" ref={fileInputRef} onChange={(e) => handleFileUpload(e, 'customers')} />
                     <FileSpreadsheet className="w-12 h-12 text-green-500 mx-auto mb-4" />
-                    <p className="text-gray-600 font-medium">Click to upload Customers CSV</p>
+                    <p className="text-gray-600 font-medium">Click to upload Customers CSV or XML</p>
                   </div>
                 </div>
               )}
@@ -1645,9 +1745,9 @@ export default function App() {
                 <div className="text-center py-12">
                   <h3 className="text-xl font-bold mb-4">Step 1: Upload WooCommerce Orders</h3>
                   <div className="border-2 border-dashed border-gray-300 rounded-xl p-12 hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => fileInputRef.current.click()}>
-                    <input type="file" accept=".csv" className="hidden" ref={fileInputRef} onChange={(e) => handleFileUpload(e, 'orders')} />
+                    <input type="file" accept=".csv, .xml" className="hidden" ref={fileInputRef} onChange={(e) => handleFileUpload(e, 'orders')} />
                     <FileSpreadsheet className="w-12 h-12 text-purple-500 mx-auto mb-4" />
-                    <p className="text-gray-600 font-medium">Click to upload Orders CSV</p>
+                    <p className="text-gray-600 font-medium">Click to upload Orders CSV or XML</p>
                   </div>
                 </div>
               )}
